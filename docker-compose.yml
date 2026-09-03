@@ -1,0 +1,104 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    # Запас соединений: api, воркеры и планировщик держат свои пулы.
+    command: postgres -c max_connections=200
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gamer_shop
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gamer_shop"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Пул ключей нарезан непересекающимися половинами: один ключ не уйдёт
+  # в два заказа даже при переключении на резервного поставщика.
+  supplier-a:
+    build: .
+    command: granian --interface asgi stub_supplier.app:app --host 0.0.0.0 --port 9000
+    environment:
+      STUB_NAME: a
+      STUB_KEYS_FILE: data/keys.json
+      STUB_KEYS_OFFSET: 0
+      STUB_KEYS_STRIDE: 2
+      STUB_FAIL_RATE: ${SUPPLIER_A_FAIL_RATE:-0.2}
+      STUB_TIMEOUT_RATE: ${SUPPLIER_A_TIMEOUT_RATE:-0.2}
+      STUB_HANG_SECONDS: 10
+    ports:
+      - "${SUPPLIER_A_PORT:-9101}:9000"
+
+  supplier-b:
+    build: .
+    command: granian --interface asgi stub_supplier.app:app --host 0.0.0.0 --port 9000
+    environment:
+      STUB_NAME: b
+      STUB_KEYS_FILE: data/keys.json
+      STUB_KEYS_OFFSET: 1
+      STUB_KEYS_STRIDE: 2
+      STUB_FAIL_RATE: ${SUPPLIER_B_FAIL_RATE:-0.1}
+      STUB_TIMEOUT_RATE: ${SUPPLIER_B_TIMEOUT_RATE:-0.0}
+      STUB_HANG_SECONDS: 10
+    ports:
+      - "${SUPPLIER_B_PORT:-9102}:9000"
+
+  migrate:
+    build: .
+    command: sh -c "alembic upgrade head && python scripts/seed_catalog.py --stock 5"
+    environment: &backend-env
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SUPPLIER_PRIMARY_URL: http://supplier-a:9000
+      SUPPLIER_FALLBACK_URL: http://supplier-b:9000
+      DELIVERY_STUCK_AFTER_SECONDS: 15
+      APP_LOG_JSON: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    build: .
+    environment: *backend-env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  worker:
+    build: .
+    command: taskiq worker gamer_shop.worker:broker --workers 2
+    environment: *backend-env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+  # Периодическое дожатие зависших заказов и сверка.
+  scheduler:
+    build: .
+    command: taskiq scheduler gamer_shop.worker:scheduler
+    environment: *backend-env
+    depends_on:
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:

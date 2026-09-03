@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.idea/
+.pytest_cache/
+*.egg-info/
+
+# PDF задания
+*.pdf
