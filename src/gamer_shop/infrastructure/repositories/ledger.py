@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ class SqlAlchemyLedgerRepository:
         ref_type: str,
         ref_id: str,
         idempotency_key: str,
+        order_item_id: str | None = None,
     ) -> bool:
         """Две строки одним запросом — «половина» проводки появиться не может."""
         txn_id = uuid4()
@@ -31,6 +32,7 @@ class SqlAlchemyLedgerRepository:
                 'id': uuid4(),
                 'txn_id': txn_id,
                 'order_id': order_id,
+                'order_item_id': order_item_id,
                 'account': debit_account.value,
                 'direction': LedgerDirection.DEBIT.value,
                 'amount': amount,
@@ -43,6 +45,7 @@ class SqlAlchemyLedgerRepository:
                 'id': uuid4(),
                 'txn_id': txn_id,
                 'order_id': order_id,
+                'order_item_id': order_item_id,
                 'account': credit_account.value,
                 'direction': LedgerDirection.CREDIT.value,
                 'amount': amount,
@@ -85,6 +88,34 @@ class SqlAlchemyLedgerRepository:
             AccountBalanceDTO(account=account, debit_total=int(d), credit_total=int(c))
             for account, d, c in (await self._session.execute(stmt)).all()
         ]
+
+    async def order_settlement(self, order_id: str) -> tuple[int, int, int]:
+        """Оплачено, выдано, возвращено по заказу — в рублях.
+
+        Это и есть проверка «оплачено = выдано + возвращено»: числа берутся
+        из проводок, а не из статусов, поэтому расхождение статуса и денег
+        не спрячется.
+        """
+        row = (
+            await self._session.execute(
+                text(
+                    """
+                    SELECT
+                      COALESCE(sum(amount) FILTER (
+                          WHERE account = 'cash_in' AND direction = 'debit'), 0) AS paid,
+                      COALESCE(sum(amount) FILTER (
+                          WHERE account = 'revenue' AND direction = 'credit'), 0) AS delivered,
+                      COALESCE(sum(amount) FILTER (
+                          WHERE account = 'refund_payable' AND direction = 'credit'), 0)
+                          AS refunded
+                    FROM ledger_entries
+                    WHERE order_id = :order_id
+                    """
+                ),
+                {'order_id': order_id},
+            )
+        ).one()
+        return int(row.paid), int(row.delivered), int(row.refunded)
 
     async def order_liability(self, order_id: str) -> int:
         debit = func.coalesce(

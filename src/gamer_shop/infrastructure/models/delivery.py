@@ -11,15 +11,15 @@ from gamer_shop.infrastructure.database import Base
 class DeliveryORM(Base):
     """Факт выдачи — последний рубеж однократности.
 
-    UNIQUE(order_id) и UNIQUE(code): даже при полном отказе логики вторая
-    выдача и повторное использование ключа физически не запишутся.
+    UNIQUE(order_item_id) и UNIQUE(code): даже при полном отказе логики вторая
+    выдача по позиции и повторное использование ключа физически не запишутся.
     """
 
     __tablename__ = 'deliveries'
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
-    order_id: Mapped[str] = mapped_column(
-        ForeignKey('orders.id', ondelete='CASCADE'), nullable=False, unique=True
+    order_item_id: Mapped[str] = mapped_column(
+        ForeignKey('order_items.id', ondelete='CASCADE'), nullable=False, unique=True
     )
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     supplier: Mapped[str] = mapped_column(String(8), nullable=False)

@@ -5,13 +5,18 @@ from gamer_shop.application.dto import (
     ReconciliationReportDTO,
     WebhookOutcome,
 )
-from gamer_shop.application.enums import DELIVERABLE_STATUSES, OrderStatus
+from gamer_shop.application.exceptions import ApplicationException
+from gamer_shop.application.enums import DELIVERABLE_ITEM_STATUSES, OrderItemStatus
 from gamer_shop.application.interfaces import DeliveryLogger, PaymentsLogger, UoW
-from gamer_shop.application.interactors.delivery import DeliverOrderInteractor
+from gamer_shop.application.interactors.delivery import DeliverOrderItemInteractor
+from gamer_shop.application.interactors.settlement import SettleOrderInteractor
 from gamer_shop.application.interactors.payment_webhook import HandlePaymentWebhookInteractor
 from gamer_shop.application.repositories import (
+    DiscrepancyRepository,
     LedgerRepository,
+    OrderItemRepository,
     OrderRepository,
+    OutboxRepository,
     PaymentEventRepository,
     ReconciliationRepository,
     SupplierRequestRepository,
@@ -29,12 +34,16 @@ class ReconciliationInteractor:
         events: PaymentEventRepository,
         requests: SupplierRequestRepository,
         ledger: LedgerRepository,
+        outbox: OutboxRepository,
+        discrepancies: DiscrepancyRepository,
         stale_after_seconds: int,
     ) -> None:
         self._reconciliation = reconciliation
         self._events = events
         self._requests = requests
         self._ledger = ledger
+        self._outbox = outbox
+        self._discrepancies = discrepancies
         self._stale_after_seconds = stale_after_seconds
 
     async def execute(self, older_than_seconds: int | None = None) -> ReconciliationReportDTO:
@@ -51,43 +60,68 @@ class ReconciliationInteractor:
             unapplied_events=await self._events.unapplied_report(REPORT_LIMIT),
             ledger_balances=balances,
             ledger_is_balanced=total == 0,
+            open_discrepancies=await self._discrepancies.open_ones(REPORT_LIMIT),
+            discrepancy_counts=await self._discrepancies.counts_by_kind(),
+            money_mismatch=await self._reconciliation.money_mismatch(REPORT_LIMIT),
             stock_drift=await self._reconciliation.stock_drift(),
+            outbox_depth=await self._outbox.stats(),
+            dead_commands=await self._outbox.dead(REPORT_LIMIT),
         )
 
 
 class RetryStuckOrdersInteractor:
-    """Дожатие «зависших» заказов.
+    """Сетка безопасности поверх аутбокса.
 
-    Задача не делает ничего своего: переиспользует тот же интерактор выдачи,
-    а значит и тот же детерминированный request_id.
+    Обычный путь — команда в очереди; сюда попадает только то, что из очереди
+    выпало: команда умерла, процесс не дошёл до постановки, заказ остался
+    нерассчитанным. Каждая находка здесь — повод посмотреть, почему аутбокс
+    её потерял, поэтому она и логируется отдельно.
     """
 
     def __init__(
         self,
         orders: OrderRepository,
-        deliver: DeliverOrderInteractor,
+        items: OrderItemRepository,
+        deliver: DeliverOrderItemInteractor,
+        settle: SettleOrderInteractor,
         logger: DeliveryLogger,
         stale_after_seconds: int,
         batch_size: int,
     ) -> None:
         self._orders = orders
+        self._items = items
         self._deliver = deliver
+        self._settle = settle
         self._logger = logger
         self._stale_after_seconds = stale_after_seconds
         self._batch_size = batch_size
 
     async def execute(self) -> list[DeliveryResultDTO]:
-        statuses = frozenset(DELIVERABLE_STATUSES | {OrderStatus.DELIVERING})
-        stale = await self._orders.find_stale(
+        statuses = frozenset(DELIVERABLE_ITEM_STATUSES | {OrderItemStatus.DELIVERING})
+        stale = await self._items.find_stale(
             statuses, self._stale_after_seconds, self._batch_size
         )
-        if not stale:
-            return []
-
-        self._logger.info('retry_stuck_orders_batch', count=len(stale))
         results: list[DeliveryResultDTO] = []
-        for order_id in stale:
-            results.append(await self._deliver.execute(order_id))
+        if stale:
+            self._logger.warning('retry_stuck_items_batch', count=len(stale))
+            for item_id in stale:
+                try:
+                    results.append(await self._deliver.execute(item_id))
+                except ApplicationException as exc:
+                    # Выдача не завершилась — это штатный исход, повтор придёт
+                    # следующим проходом.
+                    self._logger.info(
+                        'retry_stuck_item_pending', order_item_id=item_id, reason=str(exc)
+                    )
+
+        # Заказы, у которых позиции уже терминальны, а расчёта не было.
+        unsettled = await self._orders.find_unsettled(
+            self._stale_after_seconds, self._batch_size
+        )
+        if unsettled:
+            self._logger.warning('settle_stuck_orders_batch', count=len(unsettled))
+            for order_id in unsettled:
+                await self._settle.execute(order_id)
         return results
 
 

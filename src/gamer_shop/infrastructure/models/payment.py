@@ -59,15 +59,15 @@ class PaymentEventORM(Base):
 class SupplierRequestORM(Base):
     """Обращение к поставщику за кодом.
 
-    request_id закреплён за парой (заказ, поставщик) уникальным ограничением —
+    request_id закреплён за парой (позиция, поставщик) уникальным ограничением —
     повтор физически не может уехать на новый идентификатор.
     """
 
     __tablename__ = 'supplier_requests'
 
     request_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    order_id: Mapped[str] = mapped_column(
-        ForeignKey('orders.id', ondelete='CASCADE'), nullable=False
+    order_item_id: Mapped[str] = mapped_column(
+        ForeignKey('order_items.id', ondelete='CASCADE'), nullable=False
     )
     supplier: Mapped[str] = mapped_column(String(8), nullable=False, comment='a/b')
     sku: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -85,7 +85,7 @@ class SupplierRequestORM(Base):
     )
 
     __table_args__ = (
-        Index('uq_supplier_requests_order_supplier', 'order_id', 'supplier', unique=True),
+        Index('uq_supplier_requests_item_supplier', 'order_item_id', 'supplier', unique=True),
         # Незакрытые после таймаута — их дожимает фоновая задача.
         Index(
             'ix_supplier_requests_unresolved',

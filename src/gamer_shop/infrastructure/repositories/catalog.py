@@ -3,6 +3,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gamer_shop.application.dto import ProductDTO, StorefrontItemDTO, StorefrontPageDTO
+from gamer_shop.application.enums import SupplierName
 from gamer_shop.infrastructure.models import ProductORM, ProductStockORM
 
 
@@ -84,6 +85,7 @@ class SqlAlchemyProductRepository:
             currency=orm.currency,
             image=orm.image,
             is_active=orm.is_active,
+            supplier=SupplierName(orm.supplier),
         )
 
 

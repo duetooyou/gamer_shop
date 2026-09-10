@@ -33,5 +33,6 @@ class WebhookOutcome(StrEnum):
 class WebhookResultDTO:
     outcome: WebhookOutcome
     order_id: str
-    # В очередь ставим только после коммита транзакции вебхука.
-    schedule_delivery: bool = False
+    # Команда уже лежит в аутбоксе; флаг лишь просит разбудить релей,
+    # чтобы не ждать планового прохода.
+    notify_outbox: bool = False

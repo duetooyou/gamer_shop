@@ -24,6 +24,10 @@ class SupplierOutcome:
     code: str | None = None
     reason: str | None = None
     attempts: int = 0
+    # Ответ дошёл целиком. Разница существенная: молчание — это обрыв связи,
+    # а завершённый ответ с ошибкой при выданном коде — уже недобросовестность,
+    # и в журнал расхождений попадает только вторая.
+    answered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +47,7 @@ class SupplierRequestSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class DeliveryDTO:
-    order_id: str
+    order_item_id: str
     code: str
     supplier: str
     request_id: str
@@ -57,14 +61,14 @@ class DeliveryResultKind(StrEnum):
     DELIVERY_FAILED = 'delivery_failed'
     # Поставщик не ответил, судьба кода неизвестна — дожмёт фоновая задача.
     PENDING_UNKNOWN = 'pending_unknown'
-    # Заказ занят другим воркером либо не в статусе, из которого выдают.
+    # Позиция занята другим воркером либо не в статусе, из которого выдают.
     SKIPPED = 'skipped'
 
 
 @dataclass(frozen=True, slots=True)
 class DeliveryResultDTO:
     kind: DeliveryResultKind
-    order_id: str
+    order_item_id: str
     code: str | None = None
     supplier: str | None = None
     reason: str | None = None

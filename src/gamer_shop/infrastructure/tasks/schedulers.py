@@ -1,21 +1,35 @@
-from gamer_shop.application.interactors import DeliverOrderInteractor
-from gamer_shop.infrastructure.tasks.delivery import deliver_order_task
+from gamer_shop.application.interactors import OutboxRelayInteractor
+from gamer_shop.infrastructure.tasks.outbox import outbox_relay_task
 
 
-class TaskiqDeliveryScheduler:
-    async def schedule(self, order_id: str) -> None:
-        await deliver_order_task.kiq(order_id)
+class TaskiqOutboxNotifier:
+    """Побудка релея через очередь задач.
 
-
-class InlineDeliveryScheduler:
-    """Выдача сразу в текущем процессе.
-
-    Для тестов: даёт сквозной путь без воркера и заодно самую жёсткую гонку —
-    параллельные запросы выдают один заказ прямо внутри обработчика.
+    Ошибка здесь не страшна: команда уже лежит в таблице, её подберёт
+    плановый проход. Поэтому побудка и не входит в транзакцию.
     """
 
-    def __init__(self, interactor: DeliverOrderInteractor) -> None:
-        self._interactor = interactor
+    async def notify(self) -> None:
+        await outbox_relay_task.kiq()
 
-    async def schedule(self, order_id: str) -> None:
-        await self._interactor.execute(order_id)
+
+class InlineOutboxNotifier:
+    """Релей прямо в текущем процессе.
+
+    Для тестов: даёт сквозной путь без воркера и заодно самую жёсткую гонку —
+    параллельные запросы разбирают очередь внутри обработчика.
+
+    Крутится до тишины, потому что команда порождает команду: выдача просит
+    расчёт заказа, отказ — возврат. В бою эту цепочку разматывает следующий
+    проход релея, здесь ждать его негде.
+    """
+
+    MAX_PASSES = 5
+
+    def __init__(self, relay: OutboxRelayInteractor) -> None:
+        self._relay = relay
+
+    async def notify(self) -> None:
+        for _ in range(self.MAX_PASSES):
+            if await self._relay.run_once() == 0:
+                return

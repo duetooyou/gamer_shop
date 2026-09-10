@@ -3,8 +3,14 @@ from collections.abc import AsyncIterable
 import httpx
 from dishka import Provider, Scope, provide
 
-from gamer_shop.application.interfaces import DeliveryLogger, SupplierClient
+from gamer_shop.application.interfaces import (
+    DeliveryLogger,
+    PaymentGateway,
+    PaymentsLogger,
+    SupplierClient,
+)
 from gamer_shop.infrastructure.config import Config
+from gamer_shop.infrastructure.payments import PaymentHttpGateway
 from gamer_shop.infrastructure.suppliers import SupplierHttpClient
 
 
@@ -20,3 +26,9 @@ class SupplierProvider(Provider):
         self, config: Config, client: httpx.AsyncClient, logger: DeliveryLogger
     ) -> SupplierClient:
         return SupplierHttpClient(config.supplier, client, logger)
+
+    @provide(scope=Scope.APP)
+    def payment_gateway(
+        self, config: Config, client: httpx.AsyncClient, logger: PaymentsLogger
+    ) -> PaymentGateway:
+        return PaymentHttpGateway(config.payment, client, logger)

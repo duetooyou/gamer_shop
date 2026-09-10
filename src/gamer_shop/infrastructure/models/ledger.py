@@ -20,11 +20,15 @@ class LedgerEntryORM(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     txn_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
     order_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # NULL для оплаты: она приходит на заказ целиком.
+    order_item_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     account: Mapped[str] = mapped_column(String(32), nullable=False)
     direction: Mapped[str] = mapped_column(String(8), nullable=False, comment='debit/credit')
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    ref_type: Mapped[str] = mapped_column(String(32), nullable=False, comment='payment/delivery')
+    ref_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment='payment/delivery/refund'
+    )
     ref_id: Mapped[str] = mapped_column(String(128), nullable=False)
     # Повтор вебхука или выдачи не должен породить вторую проводку.
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
@@ -38,6 +42,7 @@ class LedgerEntryORM(Base):
             "direction IN ('debit', 'credit')", name='ck_ledger_direction'
         ),
         Index('ix_ledger_order_id', 'order_id'),
+        Index('ix_ledger_order_item_id', 'order_item_id'),
         Index('ix_ledger_account', 'account'),
         Index('ix_ledger_txn_id', 'txn_id'),
     )

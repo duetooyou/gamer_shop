@@ -40,6 +40,10 @@ services:
       STUB_FAIL_RATE: ${SUPPLIER_A_FAIL_RATE:-0.2}
       STUB_TIMEOUT_RATE: ${SUPPLIER_A_TIMEOUT_RATE:-0.2}
       STUB_HANG_SECONDS: 10
+      # Лимит поставщика. Магазин идёт ниже него с запасом, поэтому 429
+      # в норме не встречается, а счётчик over_limit остаётся нулевым.
+      STUB_RATE_LIMIT_PER_MINUTE: ${SUPPLIER_STUB_RATE_LIMIT_PER_MINUTE:-120}
+      STUB_RATE_LIMIT_BURST: ${SUPPLIER_STUB_RATE_LIMIT_BURST:-10}
     ports:
       - "${SUPPLIER_A_PORT:-9101}:9000"
 
@@ -54,8 +58,21 @@ services:
       STUB_FAIL_RATE: ${SUPPLIER_B_FAIL_RATE:-0.1}
       STUB_TIMEOUT_RATE: ${SUPPLIER_B_TIMEOUT_RATE:-0.0}
       STUB_HANG_SECONDS: 10
+      STUB_RATE_LIMIT_PER_MINUTE: ${SUPPLIER_STUB_RATE_LIMIT_PER_MINUTE:-120}
+      STUB_RATE_LIMIT_BURST: ${SUPPLIER_STUB_RATE_LIMIT_BURST:-10}
     ports:
       - "${SUPPLIER_B_PORT:-9102}:9000"
+
+  # Возвраты: отдельный процесс, чтобы таймаут клиента был настоящим сетевым.
+  payments:
+    build: .
+    command: granian --interface asgi stub_payment.app:app --host 0.0.0.0 --port 9200
+    environment:
+      STUB_PAYMENT_FAIL_RATE: ${PAYMENT_FAIL_RATE:-0.0}
+      STUB_PAYMENT_TIMEOUT_RATE: ${PAYMENT_TIMEOUT_RATE:-0.0}
+      STUB_PAYMENT_HANG_SECONDS: 10
+    ports:
+      - "${PAYMENT_PORT:-9201}:9200"
 
   migrate:
     build: .
@@ -67,6 +84,7 @@ services:
       REDIS_PORT: 6379
       SUPPLIER_PRIMARY_URL: http://supplier-a:9000
       SUPPLIER_FALLBACK_URL: http://supplier-b:9000
+      PAYMENT_URL: http://payments:9200
       DELIVERY_STUCK_AFTER_SECONDS: 15
       APP_LOG_JSON: "true"
     depends_on:

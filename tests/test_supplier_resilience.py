@@ -2,11 +2,17 @@
 
 import asyncio
 
-import pytest
 from sqlalchemy import text
 
 from gamer_shop.infrastructure.database import new_session_maker
-from tests.helpers import create_order, get_order, webhook
+from tests.helpers import (
+    code_of,
+    create_order,
+    delivered_by,
+    first_item,
+    get_order,
+    webhook,
+)
 
 
 
@@ -17,9 +23,9 @@ async def _supplier_request_rows(config, order_id: str) -> dict[str, tuple[str, 
             await session.execute(
                 text(
                     'SELECT supplier, state, code, request_id FROM supplier_requests '
-                    'WHERE order_id = :id'
+                    'WHERE order_item_id = :id'
                 ),
-                {'id': order_id},
+                {'id': f'{order_id}-1'},
             )
         ).all()
     await maker.kw['bind'].dispose()
@@ -34,31 +40,64 @@ async def test_request_id_is_derived_from_order_not_from_attempt(api, seeded, co
 
     rows = await _supplier_request_rows(config, order['id'])
     suffix = order['id'].removeprefix('ord_')
-    assert rows['a'][2] == f'req_{suffix}-1'
+    # Идентификатор выведен из позиции и поставщика, а не из номера попытки.
+    assert rows['a'][2] == f'req_{suffix}-1-a'
 
 
 async def test_timeout_after_issue_does_not_double_issue(api, seeded, suppliers, config):
     """Поставщик выдал код, но ответ не дошёл.
 
     Заглушка сначала выдаёт и запоминает код, и только потом зависает.
+    Запрос состояния находит этот код, и позиция закрывается им же —
+    вместо второй выдачи.
     """
     supplier_a, supplier_b = suppliers
-    # Зависание длиннее таймаута клиента и всех повторов.
+    # Зависание длиннее таймаута клиента.
     supplier_a.set_mode('timeout', hang_seconds=30)
     issued_a_before = supplier_a.issued_count()
     issued_b_before = supplier_b.issued_count()
 
-    order = await create_order(api, 'KEY-CS2-PRIME')
-    await webhook(api, order['id'], amount=1290)
+    order = await create_order(api, 'KEY-GTA5')
+    await webhook(api, order['id'], amount=1990)
 
-    # Судьба кода неизвестна — заказ остаётся в delivering.
+    # Ответа не было, но код у поставщика есть — запрос состояния его нашёл.
+    final = await get_order(api, order['id'])
+    assert final['status'] == 'delivered'
+    assert delivered_by(final) == 'a'
+
+    # A выдал ровно один код.
+    assert supplier_a.issued_count() - issued_a_before == 1
+    # К резервному не пошли: молчание — не отказ.
+    assert supplier_b.issued_count() == issued_b_before
+
+    rows = await _supplier_request_rows(config, order['id'])
+    assert rows['a'][0] == 'ok'
+    assert 'b' not in rows
+    assert supplier_a.stats()['issued'][rows['a'][2]] == code_of(final)
+
+
+async def test_silent_supplier_leaves_unknown_and_blocks_fallback(
+    api, seeded, suppliers, config
+):
+    """Поставщик молчит и на выдачу, и на запрос состояния.
+
+    Единственный случай, когда неопределённость сохраняется: правды узнать
+    негде, и уходить к резервному нельзя — код мог быть выдан.
+    """
+    supplier_a, supplier_b = suppliers
+    supplier_a.set_mode('dark', hang_seconds=30)
+    issued_a_before = supplier_a.issued_count()
+    issued_b_before = supplier_b.issued_count()
+
+    order = await create_order(api, 'KEY-GTA5')
+    await webhook(api, order['id'], amount=1990)
+
     current = await get_order(api, order['id'])
     assert current['status'] == 'delivering'
-    assert current['code'] is None
+    assert first_item(current)['status'] == 'delivering'
+    assert code_of(current) is None
 
-    # A выдал ровно один код, несмотря на несколько попыток.
     assert supplier_a.issued_count() - issued_a_before == 1
-    # К резервному не пошли: таймаут — не отказ.
     assert supplier_b.issued_count() == issued_b_before
 
     rows = await _supplier_request_rows(config, order['id'])
@@ -67,24 +106,22 @@ async def test_timeout_after_issue_does_not_double_issue(api, seeded, suppliers,
 
     # Поставщик ожил: повтор тем же request_id получает тот же код.
     supplier_a.set_mode('ok')
-    await asyncio.sleep(1.2)  # переждать порог «зависшего» заказа
+    await asyncio.sleep(1.2)  # переждать порог «зависшей» позиции
     retry = await api.post(f'/admin/orders/{order["id"]}/retry-delivery')
     assert retry.status_code == 201
 
     final = await get_order(api, order['id'])
     assert final['status'] == 'delivered'
-    assert final['supplier'] == 'a'
+    assert delivered_by(final) == 'a'
     assert supplier_a.issued_count() - issued_a_before == 1
     assert supplier_b.issued_count() == issued_b_before
-
-    request_id = rows['a'][2]
-    assert supplier_a.stats()['issued'][request_id] == final['code']
+    assert supplier_a.stats()['issued'][rows['a'][2]] == code_of(final)
 
 
 async def test_unknown_timeout_never_falls_back_to_backup(api, seeded, suppliers):
     """Из неопределённости фолбэк запрещён: иначе будет две выдачи."""
     supplier_a, supplier_b = suppliers
-    supplier_a.set_mode('timeout', hang_seconds=30)
+    supplier_a.set_mode('dark', hang_seconds=30)
     issued_b_before = supplier_b.issued_count()
 
     order = await create_order(api, 'KEY-GTA5')
@@ -110,7 +147,7 @@ async def test_primary_unavailable_falls_back_to_backup_once(
 
     final = await get_order(api, order['id'])
     assert final['status'] == 'delivered'
-    assert final['supplier'] == 'b'
+    assert delivered_by(final) == 'b'
 
     assert supplier_a.issued_count() == issued_a_before
     assert supplier_b.issued_count() - issued_b_before == 1
@@ -119,11 +156,11 @@ async def test_primary_unavailable_falls_back_to_backup_once(
     assert rows['a'][0] == 'refused'
     assert rows['b'][0] == 'ok'
     suffix = order['id'].removeprefix('ord_')
-    assert rows['b'][2] == f'req_{suffix}-2'
+    assert rows['b'][2] == f'req_{suffix}-1-b'
 
 
 async def test_both_suppliers_down_leaves_recoverable_state(api, seeded, suppliers):
-    """Оба отказали — заказ восстановим, падения нет."""
+    """Оба отказали — позиция восстановима, падения нет."""
     supplier_a, supplier_b = suppliers
     supplier_a.set_mode('fail')
     supplier_b.set_mode('fail')
@@ -132,8 +169,8 @@ async def test_both_suppliers_down_leaves_recoverable_state(api, seeded, supplie
     await webhook(api, order['id'], amount=1990)
 
     final = await get_order(api, order['id'])
-    assert final['status'] == 'delivery_failed'
-    assert final['code'] is None
+    assert first_item(final)['status'] == 'delivery_failed'
+    assert code_of(final) is None
 
     supplier_a.set_mode('ok')
     supplier_b.set_mode('ok')
@@ -141,7 +178,7 @@ async def test_both_suppliers_down_leaves_recoverable_state(api, seeded, supplie
 
     recovered = await get_order(api, order['id'])
     assert recovered['status'] == 'delivered'
-    assert recovered['code']
+    assert code_of(recovered)
 
 
 async def test_code_already_used_falls_back_instead_of_looping(
@@ -156,7 +193,7 @@ async def test_code_already_used_falls_back_instead_of_looping(
     supplier_a, supplier_b = suppliers
     donor = await create_order(api, 'STEAM-TOPUP-500')
     await webhook(api, donor['id'], amount=500)
-    taken_code = (await get_order(api, donor['id']))['code']
+    taken_code = code_of(await get_order(api, donor['id']))
 
     victim = await create_order(api, 'KEY-GTA5')
     # Код, который вернёт A, уже занят другим заказом.
@@ -166,14 +203,22 @@ async def test_code_already_used_falls_back_instead_of_looping(
             text("UPDATE orders SET status = 'paid', paid_at = now() WHERE id = :id"),
             {'id': victim['id']},
         )
+        await session.execute(
+            text("UPDATE order_items SET status = 'paid' WHERE order_id = :id"),
+            {'id': victim['id']},
+        )
         suffix = victim['id'].removeprefix('ord_')
         await session.execute(
             text(
                 'INSERT INTO supplier_requests '
-                '(request_id, order_id, supplier, sku, state, code, attempts) '
-                "VALUES (:rid, :oid, 'a', 'KEY-GTA5', 'ok', :code, 1)"
+                '(request_id, order_item_id, supplier, sku, state, code, attempts) '
+                "VALUES (:rid, :iid, 'a', 'KEY-GTA5', 'ok', :code, 1)"
             ),
-            {'rid': f'req_{suffix}-1', 'oid': victim['id'], 'code': taken_code},
+            {
+                'rid': f'req_{suffix}-1-a',
+                'iid': f'{victim["id"]}-1',
+                'code': taken_code,
+            },
         )
         await session.commit()
     await maker.kw['bind'].dispose()
@@ -184,8 +229,8 @@ async def test_code_already_used_falls_back_instead_of_looping(
 
     final = await get_order(api, victim['id'])
     assert final['status'] == 'delivered'
-    assert final['supplier'] == 'b'
-    assert final['code'] != taken_code
+    assert delivered_by(final) == 'b'
+    assert code_of(final) != taken_code
     assert supplier_b.issued_count() - issued_b_before == 1
 
     rows = await _supplier_request_rows(config, victim['id'])

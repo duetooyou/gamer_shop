@@ -2,13 +2,19 @@
 
 import asyncio
 
-import pytest
 from dishka import Scope
 from sqlalchemy import text
 
 from gamer_shop.application.interactors import ApplyOrphanEventsInteractor
 from gamer_shop.infrastructure.database import new_session_maker
-from tests.helpers import create_order, get_order, payload, webhook
+from tests.helpers import (
+    code_of,
+    create_order,
+    first_item,
+    get_order,
+    payload,
+    webhook,
+)
 
 
 
@@ -24,9 +30,10 @@ async def test_empty_stock_is_recoverable_not_a_crash(api, seeded, suppliers):
 
     assert ack['outcome'] == 'applied'
     stalled = await get_order(api, second['id'])
-    assert stalled['status'] == 'out_of_stock'
+    # Позиция восстановима, заказ ещё не закрыт: деньги не потеряны.
+    assert first_item(stalled)['status'] == 'out_of_stock'
     assert stalled['paid_at'] is not None
-    assert stalled['code'] is None
+    assert code_of(stalled) is None
 
     refill = await api.post('/admin/stock/SUB-DISCORD-1M/refill', json={'count': 5})
     assert refill.status_code == 201
@@ -34,8 +41,8 @@ async def test_empty_stock_is_recoverable_not_a_crash(api, seeded, suppliers):
     await api.post(f'/admin/orders/{second["id"]}/retry-delivery')
     recovered = await get_order(api, second['id'])
     assert recovered['status'] == 'delivered'
-    assert recovered['code']
-    assert recovered['code'] != stalled['code']
+    assert code_of(recovered)
+    assert code_of(recovered) != code_of(stalled)
 
 
 async def test_supplier_out_of_stock_is_recoverable(api, seeded, suppliers):
@@ -48,7 +55,7 @@ async def test_supplier_out_of_stock_is_recoverable(api, seeded, suppliers):
     await webhook(api, order['id'], amount=1990)
 
     stalled = await get_order(api, order['id'])
-    assert stalled['status'] == 'out_of_stock'
+    assert first_item(stalled)['status'] == 'out_of_stock'
 
     supplier_a.set_mode('ok')
     supplier_b.set_mode('ok')
@@ -101,7 +108,7 @@ async def test_late_failed_webhook_does_not_downgrade_delivered_order(api, seede
 
     final = await get_order(api, order['id'])
     assert final['status'] == 'delivered'
-    assert final['code']
+    assert code_of(final)
 
 
 async def test_amount_mismatch_is_rejected_and_visible_in_reconciliation(api, seeded):
@@ -120,20 +127,21 @@ async def test_amount_mismatch_is_rejected_and_visible_in_reconciliation(api, se
 async def test_background_job_finishes_stuck_order(api, seeded, suppliers):
     """Фоновая задача доводит «зависший» заказ до конца."""
     supplier_a, supplier_b = suppliers
-    supplier_a.set_mode('timeout', hang_seconds=30)
+    supplier_a.set_mode('dark', hang_seconds=30)
 
-    order = await create_order(api, 'KEY-CS2-PRIME')
-    await webhook(api, order['id'], amount=1290)
+    # У KEY-GTA5 поставщик A — тот, что замолчал.
+    order = await create_order(api, 'KEY-GTA5')
+    await webhook(api, order['id'], amount=1990)
     assert (await get_order(api, order['id']))['status'] == 'delivering'
 
     issued_before = supplier_a.issued_count()
     supplier_a.set_mode('ok')
-    await asyncio.sleep(1.2)  # порог «зависшего» заказа в тестах — 1 с
+    await asyncio.sleep(1.2)  # порог «зависшей» позиции в тестах — 1 с
 
     response = await api.post('/admin/retry-stuck')
     assert response.status_code == 201
-    outcomes = {o['order_id']: o['result'] for o in response.json()['outcomes']}
-    assert outcomes[order['id']] == 'delivered'
+    outcomes = {o['order_item_id']: o['result'] for o in response.json()['outcomes']}
+    assert outcomes[f'{order["id"]}-1'] == 'delivered'
 
     final = await get_order(api, order['id'])
     assert final['status'] == 'delivered'

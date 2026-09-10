@@ -3,11 +3,17 @@
 import asyncio
 import random
 
-import pytest
 from sqlalchemy import text
 
 from gamer_shop.infrastructure.database import new_session_maker
-from tests.helpers import create_order, get_order, payload, reconciliation, webhook
+from tests.helpers import (
+    create_order,
+    first_item,
+    get_order,
+    payload,
+    reconciliation,
+    webhook,
+)
 
 
 
@@ -54,14 +60,15 @@ async def test_paid_but_undelivered_order_keeps_open_liability(api, seeded, supp
 
     order = await create_order(api, 'KEY-GTA5')
     await webhook(api, order['id'], amount=1990)
-    assert (await get_order(api, order['id']))['status'] == 'delivery_failed'
+    assert first_item(await get_order(api, order['id']))['status'] == 'delivery_failed'
 
     rows = await _ledger_rows(config, order['id'])
     # Только оплата: выручку не признаём, пока товар не выдан.
     assert rows == [('cash_in', 'debit', 1990), ('customer_liability', 'credit', 1990)]
 
     report = await reconciliation(api)
-    assert any(p['order_id'] == order['id'] for p in report['paid_not_delivered'])
+    # Сверка разбирается с позициями: заказ мог быть выдан наполовину.
+    assert any(p['order_id'] == f'{order["id"]}-1' for p in report['paid_not_delivered'])
     liability = next(b for b in report['ledger_balances'] if b['account'] == 'customer_liability')
     assert liability['balance'] == -1990
 
@@ -104,32 +111,36 @@ async def test_ledger_always_balances_after_chaotic_run(api, seeded, suppliers, 
                 text('SELECT count(*), count(DISTINCT code) FROM deliveries')
             )
         ).one()
-        orders_with_two = (
+        items_with_two = (
             await session.execute(
                 text(
                     'SELECT count(*) FROM ('
-                    '  SELECT order_id FROM deliveries GROUP BY order_id HAVING count(*) > 1'
+                    '  SELECT order_item_id FROM deliveries '
+                    '  GROUP BY order_item_id HAVING count(*) > 1'
                     ') t'
                 )
             )
         ).scalar_one()
     await maker.kw['bind'].dispose()
 
-    assert total == distinct, 'один код ушёл в два заказа'
-    assert orders_with_two == 0, 'по одному заказу больше одной выдачи'
+    assert total == distinct, 'один код ушёл в две позиции'
+    assert items_with_two == 0, 'по одной позиции больше одной выдачи'
+    assert report['money_mismatch'] == [], 'оплачено не равно выдано плюс возвращено'
 
 
 async def test_reconciliation_reports_stuck_and_unresolved(api, seeded, suppliers):
     supplier_a, _ = suppliers
-    supplier_a.set_mode('timeout', hang_seconds=30)
+    supplier_a.set_mode('dark', hang_seconds=30)
 
-    order = await create_order(api, 'KEY-CS2-PRIME')
-    await webhook(api, order['id'], amount=1290)
+    # У KEY-GTA5 поставщик A — тот, что завис.
+    order = await create_order(api, 'KEY-GTA5')
+    await webhook(api, order['id'], amount=1990)
 
+    item_id = f'{order["id"]}-1'
     report = await reconciliation(api)
-    assert any(p['order_id'] == order['id'] for p in report['stuck_delivering'])
+    assert any(p['order_id'] == item_id for p in report['stuck_delivering'])
     unresolved = next(
-        p for p in report['unresolved_supplier_requests'] if p['order_id'] == order['id']
+        p for p in report['unresolved_supplier_requests'] if p['order_id'] == item_id
     )
     assert unresolved['status'] == 'supplier_a:unknown'
     assert report['ledger_is_balanced']

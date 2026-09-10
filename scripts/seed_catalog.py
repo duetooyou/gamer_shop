@@ -33,6 +33,7 @@ async def seed(catalog_file: str, stock: int, generate: int, seed_value: int) ->
             'price': p['price'],
             'currency': p['currency'],
             'image': p.get('image'),
+            'supplier': p.get('supplier', 'a'),
             'stock': stock,
         }
         for p in catalog['products']
@@ -49,6 +50,9 @@ async def seed(catalog_file: str, stock: int, generate: int, seed_value: int) ->
                 'price': rnd.choice([99, 199, 299, 499, 890, 990, 1290, 1990, 3490]),
                 'currency': 'RUB',
                 'image': None,
+                # Поставщики чередуются: заказ из нескольких товаров
+                # расходится по обоим.
+                'supplier': 'a' if i % 2 == 0 else 'b',
                 'stock': rnd.randint(0, 25),
             }
         )
@@ -56,10 +60,12 @@ async def seed(catalog_file: str, stock: int, generate: int, seed_value: int) ->
     async with maker() as session:
         await session.execute(
             text(
-                'INSERT INTO products (sku, name, type, price, currency, image, is_active) '
-                'VALUES (:sku, :name, :type, :price, :currency, :image, true) '
+                'INSERT INTO products '
+                '  (sku, name, type, price, currency, image, supplier, is_active) '
+                'VALUES (:sku, :name, :type, :price, :currency, :image, :supplier, true) '
                 'ON CONFLICT (sku) DO UPDATE SET '
-                '  name = EXCLUDED.name, type = EXCLUDED.type, price = EXCLUDED.price'
+                '  name = EXCLUDED.name, type = EXCLUDED.type, price = EXCLUDED.price, '
+                '  supplier = EXCLUDED.supplier'
             ),
             rows,
         )

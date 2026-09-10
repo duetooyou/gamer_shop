@@ -11,15 +11,19 @@ from gamer_shop.application.enums import SupplierName, SupplierRequestState
 
 class DeliveryRepository(Protocol):
     async def create_if_absent(
-        self, order_id: str, code: str, supplier: str, request_id: str
+        self, order_item_id: str, code: str, supplier: str, request_id: str
     ) -> bool:
-        """Записать выдачу. False — выдача по заказу или этот код уже есть."""
+        """Записать выдачу. False — выдача по позиции или этот код уже есть."""
         ...
 
-    async def get_by_order(self, order_id: str) -> DeliveryDTO | None: ...
+    async def get_by_item(self, order_item_id: str) -> DeliveryDTO | None: ...
 
-    async def code_taken_by_other_order(self, code: str, order_id: str) -> bool:
-        """Закреплён ли код за другим заказом.
+    async def list_by_order(self, order_id: str) -> dict[str, DeliveryDTO]:
+        """Коды заказа, разложенные по позициям."""
+        ...
+
+    async def code_taken_by_other_item(self, code: str, order_item_id: str) -> bool:
+        """Закреплён ли код за другой позицией.
 
         Нужна до фиксации: позволяет уйти к резервному поставщику
         в том же проходе.
@@ -28,10 +32,10 @@ class DeliveryRepository(Protocol):
 
 
 class SupplierRequestRepository(Protocol):
-    """По одному обращению на пару (заказ, поставщик)."""
+    """По одному обращению на пару (позиция, поставщик)."""
 
     async def get_or_create(
-        self, order_id: str, supplier: SupplierName, sku: str, request_id: str
+        self, order_item_id: str, supplier: SupplierName, sku: str, request_id: str
     ) -> SupplierRequestSnapshot:
         """Известное состояние обращения либо новая строка в pending."""
         ...
@@ -43,5 +47,5 @@ class SupplierRequestRepository(Protocol):
         ...
 
     async def state_of(
-        self, order_id: str, supplier: SupplierName
+        self, order_item_id: str, supplier: SupplierName
     ) -> SupplierRequestState | None: ...

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from gamer_shop.infrastructure.database import new_session_maker
-from tests.helpers import create_order, get_order, payload
+from tests.helpers import code_of, create_order, get_order, payload
 
 
 PARALLEL = 50
@@ -47,11 +47,13 @@ async def test_fifty_parallel_webhooks_deliver_exactly_once(
 
     final = await get_order(api, order['id'])
     assert final['status'] == 'delivered'
-    assert final['code']
+    assert code_of(final)
 
     # Одна строка выдачи — ограничение БД, а не соглашение в коде.
     assert await _count(
-        config, 'SELECT count(*) FROM deliveries WHERE order_id = :id', {'id': order['id']}
+        config,
+        'SELECT count(*) FROM deliveries WHERE order_item_id = :id',
+        {'id': f'{order["id"]}-1'},
     ) == 1
 
     issued_after = supplier_a.issued_count() + supplier_b.issued_count()
@@ -100,29 +102,39 @@ async def test_parallel_delivery_attempts_produce_one_delivery(
     """Параллельные воркеры по одному заказу: выдача всё равно одна."""
     from dishka import Scope
 
-    from gamer_shop.application.interactors import DeliverOrderInteractor
     from gamer_shop.application.enums import OrderStatus
-    from gamer_shop.application.dto import PaymentWebhookDTO
-    from gamer_shop.application.enums import PaymentStatus
+    from gamer_shop.application.exceptions import ApplicationException
+    from gamer_shop.application.interactors import (
+        DeliverOrderItemInteractor,
+        SettleOrderInteractor,
+    )
 
     supplier_a, supplier_b = suppliers
     issued_before = supplier_a.issued_count() + supplier_b.issued_count()
     order = await create_order(api, 'KEY-GTA5')
 
     # Оплачиваем напрямую, чтобы выдача не стартовала раньше времени.
+    item_id = f'{order["id"]}-1'
     maker = new_session_maker(config.postgres)
     async with maker() as session:
         await session.execute(
             text("UPDATE orders SET status = 'paid', paid_at = now() WHERE id = :id"),
             {'id': order['id']},
         )
+        await session.execute(
+            text("UPDATE order_items SET status = 'paid' WHERE id = :id"),
+            {'id': item_id},
+        )
         await session.commit()
     await maker.kw['bind'].dispose()
 
     async def deliver() -> str:
         async with container(scope=Scope.REQUEST) as rc:
-            interactor = await rc.get(DeliverOrderInteractor)
-            result = await interactor.execute(order['id'])
+            interactor = await rc.get(DeliverOrderItemInteractor)
+            try:
+                result = await interactor.execute(item_id)
+            except ApplicationException:
+                return 'pending'
             return result.kind.value
 
     results = Counter(await asyncio.gather(*(deliver() for _ in range(20))))
@@ -131,7 +143,12 @@ async def test_parallel_delivery_attempts_produce_one_delivery(
     assert results['delivered'] + results['skipped'] + results['already_delivered'] == 20
 
     assert await _count(
-        config, 'SELECT count(*) FROM deliveries WHERE order_id = :id', {'id': order['id']}
+        config,
+        'SELECT count(*) FROM deliveries WHERE order_item_id = :id',
+        {'id': item_id},
     ) == 1
     assert supplier_a.issued_count() + supplier_b.issued_count() - issued_before == 1
+
+    async with container(scope=Scope.REQUEST) as rc:
+        await (await rc.get(SettleOrderInteractor)).execute(order['id'])
     assert (await get_order(api, order['id']))['status'] == OrderStatus.DELIVERED.value

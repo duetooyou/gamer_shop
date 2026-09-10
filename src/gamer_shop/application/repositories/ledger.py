@@ -15,6 +15,7 @@ class LedgerRepository(Protocol):
         ref_type: str,
         ref_id: str,
         idempotency_key: str,
+        order_item_id: str | None = None,
     ) -> bool:
         """Проводка двумя строками. False — она уже была."""
         ...
@@ -23,4 +24,8 @@ class LedgerRepository(Protocol):
 
     async def order_liability(self, order_id: str) -> int:
         """Остаток обязательства: != 0 значит оплачен, но не выдан."""
+        ...
+
+    async def order_settlement(self, order_id: str) -> tuple[int, int, int]:
+        """Оплачено, выдано, возвращено — прямо из проводок."""
         ...

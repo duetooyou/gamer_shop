@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from gamer_shop.application.enums import SupplierName
+
 
 @dataclass(frozen=True, slots=True)
 class ProductDTO:
@@ -10,6 +12,8 @@ class ProductDTO:
     currency: str
     image: str | None
     is_active: bool
+    # Поставщик товара: в одном заказе позиции расходятся по разным.
+    supplier: SupplierName = SupplierName.A
 
 
 @dataclass(frozen=True, slots=True)

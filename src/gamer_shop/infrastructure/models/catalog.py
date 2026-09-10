@@ -17,6 +17,10 @@ class ProductORM(Base, TimestampMixin):
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default=text("'RUB'"))
     image: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Поставщик товара: в одном заказе позиции расходятся по разным.
+    supplier: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default=text("'a'")
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('true'))
 
     stock: Mapped['ProductStockORM'] = relationship(back_populates='product', lazy='noload')

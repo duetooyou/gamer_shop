@@ -13,7 +13,11 @@ from gamer_shop.application.dto import (
     SupplierRequestSnapshot,
 )
 from gamer_shop.application.enums import SupplierName, SupplierRequestState
-from gamer_shop.infrastructure.models import DeliveryORM, SupplierRequestORM
+from gamer_shop.infrastructure.models import (
+    DeliveryORM,
+    OrderItemORM,
+    SupplierRequestORM,
+)
 
 _KIND_TO_STATE = {
     SupplierOutcomeKind.OK: SupplierRequestState.OK,
@@ -23,19 +27,29 @@ _KIND_TO_STATE = {
 _STATE_TO_KIND = {v: k for k, v in _KIND_TO_STATE.items()}
 
 
+def _to_dto(orm: DeliveryORM) -> DeliveryDTO:
+    return DeliveryDTO(
+        order_item_id=orm.order_item_id,
+        code=orm.code,
+        supplier=orm.supplier,
+        request_id=orm.request_id,
+        delivered_at=orm.delivered_at,
+    )
+
+
 class SqlAlchemyDeliveryRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def create_if_absent(
-        self, order_id: str, code: str, supplier: str, request_id: str
+        self, order_item_id: str, code: str, supplier: str, request_id: str
     ) -> bool:
-        """Без указания ограничения — гасит оба конфликта: по заказу и по коду."""
+        """Без указания ограничения — гасит оба конфликта: по позиции и по коду."""
         stmt = (
             pg_insert(DeliveryORM)
             .values(
                 id=uuid4(),
-                order_id=order_id,
+                order_item_id=order_item_id,
                 code=code,
                 supplier=supplier,
                 request_id=request_id,
@@ -46,23 +60,27 @@ class SqlAlchemyDeliveryRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
-    async def code_taken_by_other_order(self, code: str, order_id: str) -> bool:
-        stmt = select(DeliveryORM.order_id).where(DeliveryORM.code == code)
+    async def code_taken_by_other_item(self, code: str, order_item_id: str) -> bool:
+        stmt = select(DeliveryORM.order_item_id).where(DeliveryORM.code == code)
         owner = (await self._session.execute(stmt)).scalar_one_or_none()
-        return owner is not None and owner != order_id
+        return owner is not None and owner != order_item_id
 
-    async def get_by_order(self, order_id: str) -> DeliveryDTO | None:
-        stmt = select(DeliveryORM).where(DeliveryORM.order_id == order_id)
+    async def get_by_item(self, order_item_id: str) -> DeliveryDTO | None:
+        stmt = select(DeliveryORM).where(DeliveryORM.order_item_id == order_item_id)
         orm = (await self._session.execute(stmt)).scalar_one_or_none()
-        if orm is None:
-            return None
-        return DeliveryDTO(
-            order_id=orm.order_id,
-            code=orm.code,
-            supplier=orm.supplier,
-            request_id=orm.request_id,
-            delivered_at=orm.delivered_at,
+        return _to_dto(orm) if orm is not None else None
+
+    async def list_by_order(self, order_id: str) -> dict[str, DeliveryDTO]:
+        """Коды заказа, разложенные по позициям."""
+        stmt = (
+            select(DeliveryORM)
+            .join(OrderItemORM, OrderItemORM.id == DeliveryORM.order_item_id)
+            .where(OrderItemORM.order_id == order_id)
         )
+        return {
+            orm.order_item_id: _to_dto(orm)
+            for orm in (await self._session.execute(stmt)).scalars().all()
+        }
 
 
 class SqlAlchemySupplierRequestRepository:
@@ -70,13 +88,13 @@ class SqlAlchemySupplierRequestRepository:
         self._session = session
 
     async def get_or_create(
-        self, order_id: str, supplier: SupplierName, sku: str, request_id: str
+        self, order_item_id: str, supplier: SupplierName, sku: str, request_id: str
     ) -> SupplierRequestSnapshot:
         await self._session.execute(
             pg_insert(SupplierRequestORM)
             .values(
                 request_id=request_id,
-                order_id=order_id,
+                order_item_id=order_item_id,
                 supplier=supplier.value,
                 sku=sku,
                 state=SupplierRequestState.PENDING.value,
@@ -108,10 +126,10 @@ class SqlAlchemySupplierRequestRepository:
         )
 
     async def state_of(
-        self, order_id: str, supplier: SupplierName
+        self, order_item_id: str, supplier: SupplierName
     ) -> SupplierRequestState | None:
         stmt = select(SupplierRequestORM.state).where(
-            SupplierRequestORM.order_id == order_id,
+            SupplierRequestORM.order_item_id == order_item_id,
             SupplierRequestORM.supplier == supplier.value,
         )
         raw = (await self._session.execute(stmt)).scalar_one_or_none()
@@ -120,7 +138,7 @@ class SqlAlchemySupplierRequestRepository:
     async def unresolved(self, limit: int) -> list[OrderProblemDTO]:
         stmt = (
             select(
-                SupplierRequestORM.order_id,
+                SupplierRequestORM.order_item_id,
                 SupplierRequestORM.request_id,
                 SupplierRequestORM.supplier,
                 SupplierRequestORM.sku,
@@ -133,7 +151,7 @@ class SqlAlchemySupplierRequestRepository:
         )
         return [
             OrderProblemDTO(
-                order_id=r.order_id,
+                order_id=r.order_item_id,
                 status=f'supplier_{r.supplier}:unknown',
                 sku=r.sku,
                 amount=0,

@@ -17,6 +17,12 @@ class StubSettings(BaseSettings):
     # Должно превышать таймаут клиента.
     hang_seconds: float = Field(default=10.0)
     latency: float = Field(default=0.0)
+    # Лимит: столько запросов в минуту заглушка принимает. Всё сверх —
+    # 429, и это ровно та ошибка, которой в магазине быть не должно.
+    # 0 — без лимита.
+    rate_limit_per_minute: int = Field(default=0)
+    # Всплеск: столько запросов подряд заглушка стерпит на полном ведре.
+    rate_limit_burst: int = Field(default=10)
     seed: int | None = Field(default=None)
 
     model_config = SettingsConfigDict(env_prefix='STUB_', extra='ignore')

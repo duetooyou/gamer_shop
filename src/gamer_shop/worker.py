@@ -11,7 +11,8 @@ from dishka.integrations.taskiq import setup_dishka
 from gamer_shop.infrastructure.config import Config
 from gamer_shop.infrastructure.services import configure_logging
 from gamer_shop.infrastructure.taskiq_base.broker import broker, scheduler
-from gamer_shop.infrastructure.tasks import delivery as _tasks  # noqa: F401 — регистрирует задачи
+from gamer_shop.infrastructure.tasks import delivery as _delivery_tasks  # noqa: F401 — регистрирует задачи
+from gamer_shop.infrastructure.tasks import outbox as _outbox_tasks  # noqa: F401 — регистрирует задачи
 from gamer_shop.ioc import setup_providers
 
 config = Config()

@@ -1,16 +1,25 @@
 """Обработка вебхука оплаты."""
 
 from gamer_shop.application.dto import (
+    NewCommandDTO,
     PaymentWebhookDTO,
     WebhookOutcome,
     WebhookResultDTO,
 )
-from gamer_shop.application.enums import LedgerAccount, OrderStatus, PaymentStatus
+from gamer_shop.application.enums import (
+    PRIORITY_PAID,
+    LedgerAccount,
+    OrderStatus,
+    OutboxCommandKind,
+    PaymentStatus,
+)
 from gamer_shop.application.interfaces import PaymentsLogger, UoW
 from gamer_shop.application.policies import sources_for
 from gamer_shop.application.repositories import (
     LedgerRepository,
+    OrderItemRepository,
     OrderRepository,
+    OutboxRepository,
     PaymentEventRepository,
 )
 
@@ -20,20 +29,28 @@ class HandlePaymentWebhookInteractor:
 
     Три рубежа: ON CONFLICT по event_id, FOR UPDATE по заказу, условный UPDATE
     по статусу. Наружу всегда 200 — 5xx заставит платёжку повторять доставку.
+
+    Выдача не ставится в очередь после коммита, а пишется командой в аутбокс
+    внутри той же транзакции: иначе смерть процесса между коммитом и
+    постановкой задачи теряла бы выдачу по оплаченному заказу.
     """
 
     def __init__(
         self,
         uow: UoW,
         orders: OrderRepository,
+        items: OrderItemRepository,
         events: PaymentEventRepository,
         ledger: LedgerRepository,
+        outbox: OutboxRepository,
         logger: PaymentsLogger,
     ) -> None:
         self._uow = uow
         self._orders = orders
+        self._items = items
         self._events = events
         self._ledger = ledger
+        self._outbox = outbox
         self._logger = logger
 
     async def execute(self, dto: PaymentWebhookDTO) -> WebhookResultDTO:
@@ -73,18 +90,18 @@ class HandlePaymentWebhookInteractor:
             log.warning('webhook_order_not_found', outcome=WebhookOutcome.ORDER_NOT_FOUND.value)
             return WebhookResultDTO(WebhookOutcome.ORDER_NOT_FOUND, dto.order_id)
 
-        if dto.amount != order.price or dto.currency != order.currency:
+        if dto.amount != order.total_amount or dto.currency != order.currency:
             await self._events.mark_rejected(dto.event_id, 'amount_mismatch')
             log.error(
                 'webhook_amount_mismatch',
                 outcome=WebhookOutcome.AMOUNT_MISMATCH.value,
-                expected_amount=order.price,
+                expected_amount=order.total_amount,
                 expected_currency=order.currency,
             )
             return WebhookResultDTO(WebhookOutcome.AMOUNT_MISMATCH, dto.order_id)
 
         if dto.status is PaymentStatus.PAID:
-            return await self._apply_paid(dto, order.price, order.currency, log)
+            return await self._apply_paid(dto, order.total_amount, order.currency, log)
         return await self._apply_failed(dto, log)
 
     async def _apply_paid(self, dto, amount: int, currency: str, log) -> WebhookResultDTO:
@@ -109,10 +126,26 @@ class HandlePaymentWebhookInteractor:
             ref_id=dto.event_id,
             idempotency_key=f'{dto.order_id}:paid',
         )
-        log.info('webhook_applied', outcome=WebhookOutcome.APPLIED.value, new_status='paid')
-        # Выдачу ставим в очередь только после коммита — иначе воркер
-        # прочитает заказ в старом состоянии.
-        return WebhookResultDTO(WebhookOutcome.APPLIED, dto.order_id, schedule_delivery=True)
+        # Позиции переходят в paid и получают по команде выдачи каждая:
+        # они идут к разным поставщикам и завершаются независимо.
+        items = await self._items.mark_paid(dto.order_id)
+        for item in items:
+            await self._outbox.enqueue(
+                NewCommandDTO(
+                    kind=OutboxCommandKind.DELIVER_ITEM,
+                    dedup_key=item.id,
+                    payload={'order_item_id': item.id},
+                    partition_key=item.supplier.value,
+                    priority=PRIORITY_PAID,
+                )
+            )
+        log.info(
+            'webhook_applied',
+            outcome=WebhookOutcome.APPLIED.value,
+            new_status='paid',
+            positions=len(items),
+        )
+        return WebhookResultDTO(WebhookOutcome.APPLIED, dto.order_id, notify_outbox=True)
 
     async def _apply_failed(self, dto, log) -> WebhookResultDTO:
         changed = await self._orders.try_transition(

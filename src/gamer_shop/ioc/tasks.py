@@ -1,10 +1,16 @@
-from dishka import Provider, Scope, provide
+from dishka import AsyncContainer, Provider, Scope, provide
 
-from gamer_shop.application.interfaces import DeliveryScheduler
-from gamer_shop.infrastructure.tasks import TaskiqDeliveryScheduler
+from gamer_shop.application.interfaces import CommandDispatcher, OutboxNotifier
+from gamer_shop.infrastructure.tasks import DishkaCommandDispatcher, TaskiqOutboxNotifier
 
 
 class TaskQueueProvider(Provider):
     @provide(scope=Scope.APP)
-    def delivery_scheduler(self) -> DeliveryScheduler:
-        return TaskiqDeliveryScheduler()
+    def command_dispatcher(self, container: AsyncContainer) -> CommandDispatcher:
+        # Контейнер нужен, чтобы открыть отдельную область видимости на каждую
+        # команду: своя сессия и своя транзакция вместо общих на всю пачку.
+        return DishkaCommandDispatcher(container)
+
+    @provide(scope=Scope.APP)
+    def outbox_notifier(self) -> OutboxNotifier:
+        return TaskiqOutboxNotifier()

@@ -1,4 +1,9 @@
-"""Фоновые задачи выдачи и сверки."""
+"""Фоновые задачи: сетка безопасности и сверка.
+
+Обычный путь выдачи идёт через аутбокс. Здесь остаётся то, что аутбокс
+подстраховывает: дожатие выпавших позиций, применение осиротевших вебхуков
+и периодическая сверка.
+"""
 
 from datetime import timedelta
 
@@ -6,7 +11,6 @@ from dishka.integrations.taskiq import FromDishka, inject
 
 from gamer_shop.application.interactors import (
     ApplyOrphanEventsInteractor,
-    DeliverOrderInteractor,
     ReconciliationInteractor,
     RetryStuckOrdersInteractor,
 )
@@ -21,23 +25,12 @@ _SCAN_INTERVAL = timedelta(seconds=_delivery.scan_interval_seconds)
 _REPORT_INTERVAL = timedelta(seconds=_delivery.scan_interval_seconds * 10)
 
 
-@broker.task(task_name='deliver_order')
-@inject(patch_module=True)
-async def deliver_order_task(
-    order_id: str, interactor: FromDishka[DeliverOrderInteractor]
-) -> str:
-    """Защита от повторной выдачи живёт в интеракторе, поэтому повторная
-    постановка той же задачи безопасна."""
-    result = await interactor.execute(order_id)
-    return result.kind.value
-
-
 @broker.task(task_name='retry_stuck_orders', schedule=[{'interval': _SCAN_INTERVAL}])
 @inject(patch_module=True)
 async def retry_stuck_orders_task(
     interactor: FromDishka[RetryStuckOrdersInteractor],
 ) -> int:
-    """Дожатие «зависших» заказов."""
+    """Дожатие позиций, выпавших из очереди команд."""
     return len(await interactor.execute())
 
 
@@ -65,7 +58,16 @@ async def reconciliation_report_task(
         stuck_delivering=len(report.stuck_delivering),
         unresolved_supplier_requests=len(report.unresolved_supplier_requests),
         unapplied_events=len(report.unapplied_events),
+        money_mismatch=len(report.money_mismatch),
+        open_discrepancies=len(report.open_discrepancies),
+        discrepancies=report.discrepancy_counts,
         ledger_is_balanced=report.ledger_is_balanced,
         stock_drift=report.stock_drift,
+        outbox_pending=sum(d.count for d in report.outbox_depth if d.state == 'pending'),
+        dead_commands=len(report.dead_commands),
     )
-    return report.ledger_is_balanced
+    return (
+        report.ledger_is_balanced
+        and not report.money_mismatch
+        and not report.open_discrepancies
+    )
